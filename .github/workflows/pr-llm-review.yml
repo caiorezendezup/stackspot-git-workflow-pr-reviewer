@@ -1,0 +1,106 @@
+name: LLM PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  gather-context-and-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get changed files and diffs
+        id: diff
+        continue-on-error: true
+        run: |
+          # Get list of changed files
+          files=$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }})
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          echo "$files" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          # Get the diff for all changed files (limit size if needed)
+          diff=$(git diff ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }})
+          
+          # Limit diff size to prevent issues with large changes
+          if [ ${#diff} -gt 50000 ]; then
+            diff="${diff:0:50000}... [TRUNCATED - diff too large]"
+          fi
+          
+          echo "diff<<EOF" >> $GITHUB_OUTPUT
+          echo "$diff" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Call LLM Prompt Workflow
+        id: llm-call
+        if: steps.diff.outcome == 'success'
+        continue-on-error: true
+        uses: your-org/your-repo/.github/workflows/llm-prompt.yml@main
+        with:
+          tenant: ${{ secrets.LLM_TENANT }}
+          clientId: ${{ secrets.LLM_CLIENT_ID }}
+          conversationId: ${{ github.run_id }}-${{ github.run_number }}
+          agentId: your-agent-id
+          userPrompt: |
+            Review the following pull request changes. 
+            Starting with a summary and an in depth review for each file.
+            
+            Files changed:
+            ${{ steps.diff.outputs.files }}
+
+            Diff:
+            ${{ steps.diff.outputs.diff }}
+
+            Please provide a comprehensive code review focusing on:
+            - Code quality and best practices
+            - Potential bugs or issues
+            - Security considerations
+            - Performance implications
+            - Suggestions for improvement
+        secrets:
+          CLIENT_SECRET: ${{ secrets.STACKSPOT_CLIENT_SECRET }} 
+
+      - name: Download LLM Answers
+        id: download-answers
+        if: steps.llm-call.outcome == 'success'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: llm-answers
+          path: .
+
+      - name: Create Pull Request Comment (safer alternative)
+        if: steps.download-answers.outcome == 'success'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Comment on PR instead of creating new PR
+          if [ -f "llm-response.txt" ]; then
+            gh pr comment ${{ github.event.pull_request.number }} --body-file llm-response.txt
+          else
+            gh pr comment ${{ github.event.pull_request.number }} --body "✅ LLM review completed but no response file found."
+          fi
+
+      - name: Handle failures gracefully
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "⚠️ LLM PR Review workflow encountered issues but continuing..."
+          
+          # Optional: Comment on PR about the failure
+          gh pr comment ${{ github.event.pull_request.number }} --body "⚠️ LLM review encountered issues and was skipped for this PR."
+          
+          # Exit successfully to not fail the entire workflow
+          exit 0
+
+      - name: Workflow Summary
+        if: always()
+        run: |
+          echo "## LLM PR Review Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Diff extraction: ${{ steps.diff.outcome }}" >> $GITHUB_STEP_SUMMARY
+          echo "- LLM call: ${{ steps.llm-call.outcome }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Download answers: ${{ steps.download-answers.outcome }}" >> $GITHUB_STEP_SUMMARY
