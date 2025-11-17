@@ -39,10 +39,10 @@ jobs:
         continue-on-error: true
         uses: your-org/your-repo/.github/workflows/llm-prompt.yml@main
         with:
-          tenant: ${{ secrets.LLM_TENANT }}
-          clientId: ${{ secrets.LLM_CLIENT_ID }}
+          tenant: ${{ env.LLM_TENANT }}
+          clientId: ${{ env.LLM_CLIENT_ID }}
           conversationId: ${{ github.run_id }}-${{ github.run_number }}
-          agentId: your-agent-id
+          agentId: ${{ env.LLM_AGENT_ID }}
           userPrompt: |
             Review the following pull request changes. 
             Starting with a summary and an in depth review for each file.
