@@ -1,8 +1,27 @@
 name: LLM PR Review
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+  workflow_call:
+    inputs:
+      tenant:
+        required: true
+        type: string
+        description: "StackSpot tenant identifier"
+      client_id:
+        required: true
+        type: string
+        description: "OAuth client ID"
+      agent_id:
+        required: true
+        type: string
+        description: "Agent identifier"
+    secrets:
+      CLIENT_SECRET:
+        required: true
+        description: "OAuth client secret"
+      GITHUB_TOKEN:
+        required: true
+        description: "Github secret token to post comment on PR"
 
 jobs:
   gather-context-and-review:
@@ -39,10 +58,10 @@ jobs:
         continue-on-error: true
         uses: caiorezendezup/stackspot-git-workflow-pr-reviewer/.github/workflows/llm-prompt.yml@main
         with:
-          tenant: ${{ env.LLM_TENANT }}
-          clientId: ${{ env.LLM_CLIENT_ID }}
+          tenant: ${{ inputs.tenant }}
+          clientId: ${{ inputs.client_id }}
           conversationId: ${{ github.run_id }}-${{ github.run_number }}
-          agentId: ${{ env.LLM_AGENT_ID }}
+          agentId: ${{ inputs.agent_id }}
           userPrompt: |
             Review the following pull request changes. 
             Starting with a summary and an in depth review for each file.
@@ -60,7 +79,7 @@ jobs:
             - Performance implications
             - Suggestions for improvement
         secrets:
-          CLIENT_SECRET: ${{ secrets.STACKSPOT_CLIENT_SECRET }} 
+          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }} 
 
       - name: Download LLM Answers
         id: download-answers
