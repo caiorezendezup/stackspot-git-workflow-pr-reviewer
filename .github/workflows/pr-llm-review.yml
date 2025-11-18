@@ -24,8 +24,11 @@ on:
         description: "Github secret token to post comment on PR"
 
 jobs:
-  gather-context-and-review:
+  gather-context:
     runs-on: ubuntu-latest
+    outputs:
+      files: ${{ steps.diff.outputs.files }}
+      diff: ${{ steps.diff.outputs.diff }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -52,51 +55,55 @@ jobs:
           echo "$diff" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Call LLM Prompt Workflow
-        id: llm-call
-        if: steps.diff.outcome == 'success'
-        continue-on-error: true
-        uses: ./.github/workflows/llm-prompt.yml@main
-        with:
-          tenant: ${{ inputs.tenant }}
-          clientId: ${{ inputs.client_id }}
-          conversationId: ${{ github.run_id }}-${{ github.run_number }}
-          agentId: ${{ inputs.agent_id }}
-          userPrompt: |
-            Review the following pull request changes. 
-            Starting with a summary and an in depth review for each file.
-            
-            Files changed:
-            ${{ steps.diff.outputs.files }}
+  call-llm:
+    needs: gather-context
+    uses: ./.github/workflows/llm-prompt.yml
+    with:
+      tenant: ${{ inputs.tenant }}
+      clientId: ${{ inputs.client_id }}
+      conversationId: ${{ github.run_id }}-${{ github.run_number }}
+      agentId: ${{ inputs.agent_id }}
+      userPrompt: |
+        Review the following pull request changes. 
+        Starting with a summary and an in depth review for each file.
+        
+        Files changed:
+        ${{ needs.gather-context.outputs.files }}
 
-            Diff:
-            ${{ steps.diff.outputs.diff }}
+        Diff:
+        ${{ needs.gather-context.outputs.diff }}
 
-            Please provide a comprehensive code review focusing on:
-            - Code quality and best practices
-            - Potential bugs or issues
-            - Security considerations
-            - Performance implications
-            - Suggestions for improvement
-        secrets:
-          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }} 
+        Please provide a comprehensive code review focusing on:
+        - Code quality and best practices
+        - Potential bugs or issues
+        - Security considerations
+        - Performance implications
+        - Suggestions for improvement
+    secrets:
+      CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+
+  create-pr-comment:
+    needs: [gather-context, call-llm]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Download LLM Answers
         id: download-answers
-        if: steps.llm-call.outcome == 'success'
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: llm-answers
           path: .
 
-      - name: Create Pull Request Comment (safer alternative)
+      - name: Create Pull Request Comment
         if: steps.download-answers.outcome == 'success'
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Comment on PR instead of creating new PR
           if [ -f "llm-response.txt" ]; then
             gh pr comment ${{ github.event.pull_request.number }} --body-file llm-response.txt
           else
@@ -104,22 +111,17 @@ jobs:
           fi
 
       - name: Handle failures gracefully
-        if: failure()
+        if: failure() || needs.call-llm.result == 'failure'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "⚠️ LLM PR Review workflow encountered issues but continuing..."
-          
-          # Optional: Comment on PR about the failure
           gh pr comment ${{ github.event.pull_request.number }} --body "⚠️ LLM review encountered issues and was skipped for this PR."
-          
-          # Exit successfully to not fail the entire workflow
-          exit 0
 
       - name: Workflow Summary
         if: always()
         run: |
           echo "## LLM PR Review Summary" >> $GITHUB_STEP_SUMMARY
-          echo "- Diff extraction: ${{ steps.diff.outcome }}" >> $GITHUB_STEP_SUMMARY
-          echo "- LLM call: ${{ steps.llm-call.outcome }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Context gathering: ${{ needs.gather-context.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- LLM call: ${{ needs.call-llm.result }}" >> $GITHUB_STEP_SUMMARY
           echo "- Download answers: ${{ steps.download-answers.outcome }}" >> $GITHUB_STEP_SUMMARY
