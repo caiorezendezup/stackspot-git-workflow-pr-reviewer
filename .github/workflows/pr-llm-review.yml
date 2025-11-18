@@ -19,7 +19,7 @@ on:
       CLIENT_SECRET:
         required: true
         description: "OAuth client secret"
-      GITHUB_TOKEN:
+      PR_GITHUB_TOKEN:
         required: true
         description: "Github secret token to post comment on PR"
 
@@ -102,7 +102,7 @@ jobs:
         if: steps.download-answers.outcome == 'success'
         continue-on-error: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PR_GITHUB_TOKEN }}
         run: |
           if [ -f "llm-response.txt" ]; then
             gh pr comment ${{ github.event.pull_request.number }} --body-file llm-response.txt
@@ -113,7 +113,7 @@ jobs:
       - name: Handle failures gracefully
         if: failure() || needs.call-llm.result == 'failure'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PR_GITHUB_TOKEN }}
         run: |
           echo "⚠️ LLM PR Review workflow encountered issues but continuing..."
           gh pr comment ${{ github.event.pull_request.number }} --body "⚠️ LLM review encountered issues and was skipped for this PR."

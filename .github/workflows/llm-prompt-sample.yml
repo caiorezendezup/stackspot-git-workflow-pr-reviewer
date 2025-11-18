@@ -14,5 +14,3 @@ jobs:
       user_prompt: "Help me with this code"
     secrets:
       CLIENT_SECRET: ${{ secrets.STACKSPOT_CLIENT_SECRET }} 
-
-# do not forget the secret.GITHUB_TOKEN for the pr to be commented
