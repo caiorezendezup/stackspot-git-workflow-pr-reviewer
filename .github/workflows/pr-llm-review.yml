@@ -56,7 +56,7 @@ jobs:
         id: llm-call
         if: steps.diff.outcome == 'success'
         continue-on-error: true
-        uses: caiorezendezup/stackspot-git-workflow-pr-reviewer/.github/workflows/llm-prompt.yml@main
+        uses: ./.github/workflows/llm-prompt.yml@main
         with:
           tenant: ${{ inputs.tenant }}
           clientId: ${{ inputs.client_id }}
