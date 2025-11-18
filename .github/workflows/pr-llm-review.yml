@@ -60,10 +60,10 @@ jobs:
     uses: ./.github/workflows/llm-prompt.yml
     with:
       tenant: ${{ inputs.tenant }}
-      clientId: ${{ inputs.client_id }}
-      conversationId: ${{ github.run_id }}-${{ github.run_number }}
-      agentId: ${{ inputs.agent_id }}
-      userPrompt: |
+      client_id: ${{ inputs.client_id }}
+      conversation_id: ${{ github.run_id }}-${{ github.run_number }}
+      agent_id: ${{ inputs.agent_id }}
+      user_prompt: |
         Review the following pull request changes. 
         Starting with a summary and an in depth review for each file.
         
