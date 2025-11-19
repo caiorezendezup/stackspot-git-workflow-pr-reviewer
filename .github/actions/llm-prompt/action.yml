@@ -101,38 +101,57 @@ runs:
             "user_prompt": $user_prompt
           }')
         
-        # Make the API call and process streaming response
-        curl --fail --silent \
+        echo "Payload: $payload"
+        
+        # Make the API call with timeout and better error handling
+        timeout 300 curl --fail --silent --show-error \
           'https://genai-code-buddy-api.stackspot.com/v3/chat' \
           -H "accept: text/event-stream" \
           -H "authorization: Bearer ${{ steps.oauth.outputs.token }}" \
           -H "content-type: application/json" \
           --data-raw "$payload" \
-          | grep '^data:' \
-          | sed 's/^data://' \
-          | jq -r 'select(. != "" and . != " ") | fromjson? | select(.answer != null) | .answer' \
-          > answers.txt || {
-            echo "Error: API call failed or no valid answers received"
+          > stream_response.txt || {
+            echo "Error: API call failed"
+            if [[ -f stream_response.txt ]]; then
+              echo "Stream response content:"
+              cat stream_response.txt
+            fi
             exit 1
           }
         
-        if [[ ! -s answers.txt ]]; then
-          echo "Warning: No answers received from LLM API"
-          echo "No response received" > answers.txt
+        echo "Raw stream response:"
+        cat stream_response.txt
+        
+        # Process the stream response more carefully
+        grep '^data:' stream_response.txt | while IFS= read -r line; do
+          data_content=$(echo "$line" | sed 's/^data: *//')
+          if [[ -n "$data_content" && "$data_content" != "{}" ]]; then
+            echo "$data_content" | jq -r 'select(.answer != null) | .answer' 2>/dev/null || true
+          fi
+        done > answers.txt
+        
+        # Concatenate all answer fragments
+        if [[ -f answers.txt && -s answers.txt ]]; then
+          # Remove empty lines and concatenate
+          grep -v '^$' answers.txt | tr -d '\n' > final_answer.txt || echo "No content to process" > final_answer.txt
+        else
+          echo "No answer fragments found in stream" > final_answer.txt
         fi
         
-        echo "LLM Response received:"
-        cat answers.txt
+        echo "Final answer:"
+        cat final_answer.txt
 
     - name: Set output
       id: output
       shell: bash
       run: |
-        if [[ -f answers.txt ]]; then
+        if [[ -f final_answer.txt ]]; then
           # Set multiline output safely
           {
             echo 'response<<EOF'
-            cat answers.txt
+            cat final_answer.txt
             echo 'EOF'
           } >> $GITHUB_OUTPUT
+        else
+          echo 'response=No response received' >> $GITHUB_OUTPUT
         fi
