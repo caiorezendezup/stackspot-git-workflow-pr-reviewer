@@ -1,0 +1,132 @@
+name: 'LLM Prompt Action'
+description: 'Calls StackSpot LLM API with OAuth authentication'
+author: 'Your Name'
+
+inputs:
+  tenant:
+    description: 'StackSpot tenant identifier'
+    required: true
+  client_id:
+    description: 'OAuth client ID'
+    required: true
+  client_secret:
+    description: 'OAuth client secret'
+    required: true
+  conversation_id:
+    description: 'Conversation identifier'
+    required: true
+  agent_id:
+    description: 'Agent identifier'
+    required: true
+  user_prompt:
+    description: 'User prompt for the LLM'
+    required: true
+
+outputs:
+  response:
+    description: 'LLM response text'
+    value: ${{ steps.output.outputs.response }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate inputs
+      shell: bash
+      run: |
+        if [[ -z "${{ inputs.tenant }}" || -z "${{ inputs.client_id }}" || -z "${{ inputs.conversation_id }}" || -z "${{ inputs.agent_id }}" || -z "${{ inputs.user_prompt }}" ]]; then
+          echo "Error: All required inputs must be provided"
+          exit 1
+        fi
+
+    - name: Get OAuth Token
+      id: oauth
+      shell: bash
+      run: |
+        set -euo pipefail
+        
+        echo "Requesting OAuth token..."
+        response=$(curl --fail --silent --location \
+          --request POST "https://idm.stackspot.com/${{ inputs.tenant }}/oidc/oauth/token" \
+          --header 'Content-Type: application/x-www-form-urlencoded' \
+          --data-urlencode "client_id=${{ inputs.client_id }}" \
+          --data-urlencode 'grant_type=client_credentials' \
+          --data-urlencode "client_secret=${{ inputs.client_secret }}")
+        
+        if ! token=$(echo "$response" | jq -r '.access_token // empty'); then
+          echo "Error: Failed to parse access token from response"
+          exit 1
+        fi
+        
+        if [[ -z "$token" || "$token" == "null" ]]; then
+          echo "Error: No access token received"
+          exit 1
+        fi
+        
+        echo "::add-mask::$token"
+        echo "token=$token" >> $GITHUB_OUTPUT
+
+    - name: Call LLM API
+      id: llm
+      shell: bash
+      run: |
+        set -euo pipefail
+        
+        echo "Calling LLM API..."
+        
+        # Escape user prompt for JSON
+        user_prompt_escaped=$(echo '${{ inputs.user_prompt }}' | jq -Rs .)
+        
+        # Create the JSON payload
+        payload=$(jq -nc \
+          --arg conversation_id "${{ inputs.conversation_id }}" \
+          --arg agent_id "${{ inputs.agent_id }}" \
+          --argjson user_prompt "$user_prompt_escaped" \
+          '{
+            "context": {
+              "conversation_id": $conversation_id,
+              "upload_ids": [],
+              "agent_id": $agent_id,
+              "agent_built_in": true,
+              "os": "github-action",
+              "platform": "github-action",
+              "platform_version": "1.0",
+              "stackspot_ai_version": "2.4.0"
+            },
+            "user_prompt": $user_prompt
+          }')
+        
+        # Make the API call and process streaming response
+        curl --fail --silent \
+          'https://genai-code-buddy-api.stackspot.com/v3/chat' \
+          -H "accept: text/event-stream" \
+          -H "authorization: Bearer ${{ steps.oauth.outputs.token }}" \
+          -H "content-type: application/json" \
+          --data-raw "$payload" \
+          | grep '^data:' \
+          | sed 's/^data://' \
+          | jq -r 'select(. != "" and . != " ") | fromjson? | select(.answer != null) | .answer' \
+          > answers.txt || {
+            echo "Error: API call failed or no valid answers received"
+            exit 1
+          }
+        
+        if [[ ! -s answers.txt ]]; then
+          echo "Warning: No answers received from LLM API"
+          echo "No response received" > answers.txt
+        fi
+        
+        echo "LLM Response received:"
+        cat answers.txt
+
+    - name: Set output
+      id: output
+      shell: bash
+      run: |
+        if [[ -f answers.txt ]]; then
+          # Set multiline output safely
+          {
+            echo 'response<<EOF'
+            cat answers.txt
+            echo 'EOF'
+          } >> $GITHUB_OUTPUT
+        fi
