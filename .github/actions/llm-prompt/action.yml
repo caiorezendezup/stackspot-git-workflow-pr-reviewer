@@ -25,7 +25,7 @@ inputs:
 outputs:
   response:
     description: 'LLM response text'
-    value: ${{ steps.output.outputs.response }}
+    value: ${{ steps.llm.outputs.response }}
 
 runs:
   using: 'composite'
@@ -71,7 +71,7 @@ runs:
         echo "::add-mask::$token"
         echo "token=$token" >> $GITHUB_OUTPUT
 
-    - name: Call LLM API
+    - name: Call LLM API and Set Output
       id: llm
       shell: bash
       run: |
@@ -123,35 +123,25 @@ runs:
         cat stream_response.txt
         
         # Process the stream response more carefully
-        grep '^data:' stream_response.txt | while IFS= read -r line; do
-          data_content=$(echo "$line" | sed 's/^data: *//')
-          if [[ -n "$data_content" && "$data_content" != "{}" ]]; then
-            echo "$data_content" | jq -r 'select(.answer != null) | .answer' 2>/dev/null || true
+        final_response=""
+        while IFS= read -r line; do
+          if [[ "$line" =~ ^data:\ (.+)$ ]]; then
+            data_content="${BASH_REMATCH[1]}"
+            if [[ -n "$data_content" && "$data_content" != "{}" ]]; then
+              answer=$(echo "$data_content" | jq -r 'select(.answer != null) | .answer' 2>/dev/null || echo "")
+              if [[ -n "$answer" ]]; then
+                final_response="${final_response}${answer}"
+              fi
+            fi
           fi
-        done > answers.txt
+        done < stream_response.txt
         
-        # Concatenate all answer fragments
-        if [[ -f answers.txt && -s answers.txt ]]; then
-          # Remove empty lines and concatenate
-          grep -v '^$' answers.txt | tr -d '\n' > final_answer.txt || echo "No content to process" > final_answer.txt
-        else
-          echo "No answer fragments found in stream" > final_answer.txt
-        fi
+        echo "Final response: $final_response"
         
-        echo "Final answer:"
-        cat final_answer.txt
-
-    - name: Set output
-      id: output
-      shell: bash
-      run: |
-        if [[ -f final_answer.txt ]]; then
-          # Set multiline output safely
-          {
-            echo 'response<<EOF'
-            cat final_answer.txt
-            echo 'EOF'
-          } >> $GITHUB_OUTPUT
-        else
-          echo 'response=No response received' >> $GITHUB_OUTPUT
-        fi
+        # Set output using proper multiline format with unique delimiter
+        delimiter="LLMRESPONSE_$(date +%s)_$$"
+        {
+          echo "response<<${delimiter}"
+          echo "$final_response"
+          echo "$delimiter"
+        } >> $GITHUB_OUTPUT
