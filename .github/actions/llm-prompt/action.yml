@@ -30,46 +30,68 @@ outputs:
 runs:
   using: 'composite'
   steps:
-    - name: Validate inputs
+    - name: Prepare Input Files
       shell: bash
       run: |
         set -euo pipefail
         
-        # Store inputs in temporary files to avoid shell escaping issues
-        echo '${{ toJSON(inputs.tenant) }}' | jq -r '.' > /tmp/tenant
-        echo '${{ toJSON(inputs.client_id) }}' | jq -r '.' > /tmp/client_id
-        echo '${{ toJSON(inputs.client_secret) }}' | jq -r '.' > /tmp/client_secret
-        echo '${{ toJSON(inputs.conversation_id) }}' | jq -r '.' > /tmp/conversation_id
-        echo '${{ toJSON(inputs.agent_id) }}' | jq -r '.' > /tmp/agent_id
-        echo '${{ toJSON(inputs.user_prompt) }}' | jq -r '.' > /tmp/user_prompt
+        # Create a secure temporary directory
+        TEMP_DIR=$(mktemp -d)
+        echo "TEMP_DIR=$TEMP_DIR" >> $GITHUB_ENV
         
-        # Set environment variables from files
-        echo "TENANT=$(cat /tmp/tenant)" >> $GITHUB_ENV
-        echo "CLIENT_ID=$(cat /tmp/client_id)" >> $GITHUB_ENV
-        echo "CLIENT_SECRET=$(cat /tmp/client_secret)" >> $GITHUB_ENV
-        echo "CONVERSATION_ID=$(cat /tmp/conversation_id)" >> $GITHUB_ENV
-        echo "AGENT_ID=$(cat /tmp/agent_id)" >> $GITHUB_ENV
-        echo "USER_PROMPT<<EOF" >> $GITHUB_ENV
-        cat /tmp/user_prompt >> $GITHUB_ENV
-        echo "EOF" >> $GITHUB_ENV
+        # Write inputs directly to files using GitHub's toJSON to handle escaping
+        cat > "$TEMP_DIR/tenant.json" << 'EOF'
+        ${{ toJSON(inputs.tenant) }}
+        EOF
+        
+        cat > "$TEMP_DIR/client_id.json" << 'EOF'
+        ${{ toJSON(inputs.client_id) }}
+        EOF
+        
+        cat > "$TEMP_DIR/client_secret.json" << 'EOF'
+        ${{ toJSON(inputs.client_secret) }}
+        EOF
+        
+        cat > "$TEMP_DIR/conversation_id.json" << 'EOF'
+        ${{ toJSON(inputs.conversation_id) }}
+        EOF
+        
+        cat > "$TEMP_DIR/agent_id.json" << 'EOF'
+        ${{ toJSON(inputs.agent_id) }}
+        EOF
+        
+        cat > "$TEMP_DIR/user_prompt.json" << 'EOF'
+        ${{ toJSON(inputs.user_prompt) }}
+        EOF
+        
+        # Parse JSON files to get actual values
+        jq -r '.' "$TEMP_DIR/tenant.json" > "$TEMP_DIR/tenant.txt"
+        jq -r '.' "$TEMP_DIR/client_id.json" > "$TEMP_DIR/client_id.txt"
+        jq -r '.' "$TEMP_DIR/client_secret.json" > "$TEMP_DIR/client_secret.txt"
+        jq -r '.' "$TEMP_DIR/conversation_id.json" > "$TEMP_DIR/conversation_id.txt"
+        jq -r '.' "$TEMP_DIR/agent_id.json" > "$TEMP_DIR/agent_id.txt"
+        jq -r '.' "$TEMP_DIR/user_prompt.json" > "$TEMP_DIR/user_prompt.txt"
         
         # Mask sensitive data
-        echo "::add-mask::$(cat /tmp/client_secret)"
-        
-        # Cleanup temporary files
-        rm -f /tmp/tenant /tmp/client_id /tmp/client_secret /tmp/conversation_id /tmp/agent_id /tmp/user_prompt
+        echo "::add-mask::$(cat "$TEMP_DIR/client_secret.txt")"
         
         # Validate required inputs
-        if [[ -z "$TENANT" || -z "$CLIENT_ID" || -z "$CLIENT_SECRET" || -z "$CONVERSATION_ID" || -z "$AGENT_ID" || -z "$USER_PROMPT" ]]; then
-          echo "Error: All required inputs must be provided"
-          exit 1
-        fi
+        for file in tenant client_id client_secret conversation_id agent_id user_prompt; do
+          if [[ ! -s "$TEMP_DIR/${file}.txt" ]]; then
+            echo "Error: Input '${file}' is required but empty"
+            exit 1
+          fi
+        done
 
     - name: Get OAuth Token
       id: oauth
       shell: bash
       run: |
         set -euo pipefail
+        
+        TENANT=$(cat "$TEMP_DIR/tenant.txt")
+        CLIENT_ID=$(cat "$TEMP_DIR/client_id.txt")
+        CLIENT_SECRET=$(cat "$TEMP_DIR/client_secret.txt")
         
         echo "Requesting OAuth token..."
         response=$(curl --fail --silent --location \
@@ -92,6 +114,7 @@ runs:
         fi
         
         echo "::add-mask::$token"
+        echo "$token" > "$TEMP_DIR/token.txt"
         echo "token=$token" >> $GITHUB_OUTPUT
 
     - name: Call LLM API and Set Output
@@ -102,39 +125,41 @@ runs:
         
         echo "Calling LLM API..."
         
-        # Create the JSON payload using environment variables
-        payload=$(jq -nc \
-          --arg conversation_id "$CONVERSATION_ID" \
-          --arg agent_id "$AGENT_ID" \
-          --arg user_prompt "$USER_PROMPT" \
+        # Create the JSON payload directly from files to avoid shell escaping
+        jq -nc \
+          --rawfile conversation_id "$TEMP_DIR/conversation_id.txt" \
+          --rawfile agent_id "$TEMP_DIR/agent_id.txt" \
+          --rawfile user_prompt "$TEMP_DIR/user_prompt.txt" \
           '{
             "context": {
-              "conversation_id": $conversation_id,
+              "conversation_id": ($conversation_id | rtrimstr("\n")),
               "upload_ids": [],
-              "agent_id": $agent_id,
+              "agent_id": ($agent_id | rtrimstr("\n")),
               "agent_built_in": true,
               "os": "github-action",
               "platform": "github-action",
               "platform_version": "1.0",
               "stackspot_ai_version": "2.4.0"
             },
-            "user_prompt": $user_prompt
-          }')
+            "user_prompt": ($user_prompt | rtrimstr("\n"))
+          }' > "$TEMP_DIR/payload.json"
+        
+        TOKEN=$(cat "$TEMP_DIR/token.txt")
         
         echo "Making API request..."
         
-        # Make the API call with timeout and better error handling
+        # Make the API call using the payload file
         timeout 300 curl --fail --silent --show-error \
           'https://genai-code-buddy-api.stackspot.com/v3/chat' \
           -H "accept: text/event-stream" \
-          -H "authorization: Bearer ${{ steps.oauth.outputs.token }}" \
+          -H "authorization: Bearer ${TOKEN}" \
           -H "content-type: application/json" \
-          --data-raw "$payload" \
-          > stream_response.txt || {
+          --data-binary "@$TEMP_DIR/payload.json" \
+          > "$TEMP_DIR/stream_response.txt" || {
             echo "Error: API call failed"
-            if [[ -f stream_response.txt ]]; then
+            if [[ -f "$TEMP_DIR/stream_response.txt" ]]; then
               echo "Stream response content:"
-              cat stream_response.txt
+              cat "$TEMP_DIR/stream_response.txt"
             fi
             exit 1
           }
@@ -153,10 +178,7 @@ runs:
               fi
             fi
           fi
-        done < stream_response.txt
-        
-        # Cleanup
-        rm -f stream_response.txt
+        done < "$TEMP_DIR/stream_response.txt"
         
         if [[ -z "$final_response" ]]; then
           echo "Warning: No response content received from LLM"
@@ -169,5 +191,13 @@ runs:
         {
           echo "response<<${delimiter}"
           echo "$final_response"
-          echo "$delimiter"
+          echo "${delimiter}"
         } >> $GITHUB_OUTPUT
+
+    - name: Cleanup
+      if: always()
+      shell: bash
+      run: |
+        if [[ -n "${TEMP_DIR:-}" && -d "$TEMP_DIR" ]]; then
+          rm -rf "$TEMP_DIR"
+        fi
